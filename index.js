@@ -32,22 +32,49 @@ const platformMap = {
 const platformKey = `${platform}-${arch}`;
 const nativeTarget = platformMap[platformKey];
 
+const optionalBinaryPackageMap = {
+  'darwin-arm64': '@oxc-solid-js/compiler-darwin-arm64',
+  'darwin-x64': '@oxc-solid-js/compiler-darwin-x64',
+  'linux-x64': '@oxc-solid-js/compiler-linux-x64-gnu',
+  'win32-x64': '@oxc-solid-js/compiler-win32-x64-msvc',
+};
+
 // Try to load the native module
 if (!nativeBinding) {
+  const loadErrors = [];
+
   try {
     if (nativeTarget) {
-      // Try platform-specific binary first
+      // Try platform-specific binary colocated with package first
       nativeBinding = require(join(__dirname, `oxc-solid-js-compiler.${nativeTarget}.node`));
     } else {
       // Fallback to generic name
       nativeBinding = require(join(__dirname, 'oxc-solid-js-compiler.node'));
     }
   } catch (e) {
-    // Fallback message if native module not found
+    loadErrors.push(e);
+  }
+
+  if (!nativeBinding) {
+    const optionalPackage = optionalBinaryPackageMap[platformKey];
+
+    if (optionalPackage) {
+      try {
+        nativeBinding = require(optionalPackage);
+      } catch (e) {
+        loadErrors.push(e);
+      }
+    }
+  }
+
+  if (!nativeBinding) {
     console.warn(
       `@oxc-solid-js/compiler: Native module not found for ${platformKey}. Run \`npm run build\` to compile.`,
     );
-    console.warn(e instanceof Error ? e.message : String(e));
+
+    for (const err of loadErrors) {
+      console.warn(err instanceof Error ? err.message : String(err));
+    }
   }
 }
 
