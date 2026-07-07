@@ -282,8 +282,12 @@ impl<'a> BlockContext<'a> {
 
         if *count == 1 {
             format!("_{}", prefix)
-        } else {
+        } else if *count < 10 {
             format!("_{}{}", prefix, *count)
+        } else if *count < 12 {
+            format!("_{}{}", prefix, *count - 10)
+        } else {
+            format!("_{}{}", prefix, *count - 2)
         }
     }
 

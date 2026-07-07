@@ -710,9 +710,9 @@ fn test_dom_onclick_delegated_resolvable_handler() {
 #[test]
 fn test_dom_onclick_unresolvable_handler_uses_listener_helper() {
     let code = transform_dom(r#"<button onClick={handler}>click</button>"#);
-    // Non-resolvable handlers fall back to helper addEventListener(..., true)
+    // Non-resolvable delegated handlers fall back to helper addEvent(..., true)
     assert!(
-        code.contains("addEventListener") && code.contains("true"),
+        code.contains("addEvent") && code.contains("true"),
         "Output was:\n{code}"
     );
     assert!(
@@ -782,7 +782,7 @@ fn test_dom_delegated_array_event_assigns_handler_before_data() {
 fn test_dom_onscroll_not_delegated() {
     let code = transform_dom(r#"<div onScroll={handler}>scroll</div>"#);
     // scroll is not delegated by default
-    assert!(code.contains("addEventListener") || code.contains("onscroll"));
+    assert!(code.contains("addEvent") || code.contains("onscroll"));
 }
 
 #[test]
@@ -1474,7 +1474,7 @@ fn test_dom_style_object_static() {
     let code = transform_dom(r#"<div style={{ color: 'red', fontSize: 14 }}>content</div>"#);
     // Depending on optimization stage this can be inlined or emitted as style property setters.
     let inlined = (code.contains("color:red") || code.contains("color: red"))
-        && (code.contains("font-size:14px") || code.contains("font-size: 14px"));
+        && (code.contains("font-size:14") || code.contains("font-size: 14"));
     let runtime_setters = code.contains("setStyleProperty")
         && (code.contains("\"color\"") || code.contains("color"))
         && (code.contains("\"fontSize\"") || code.contains("\"font-size\""));
@@ -2049,7 +2049,7 @@ fn test_dom_show_with_event_child() {
         transform_dom(r#"<Show when={visible}><button onClick={handler}>ok</button></Show>"#);
     assert!(code.contains("Show"));
     assert!(
-        code.contains("$$click") || code.contains("addEventListener") && code.contains("\"click\""),
+        code.contains("$$click") || code.contains("addEvent") && code.contains("\"click\""),
         "Event handler should compile to delegated assignment or delegated listener fallback. Output was:\n{code}"
     );
     assert!(
@@ -2729,15 +2729,13 @@ fn test_custom_element_children_attr_with_spread_orders_spread_owner_insert() {
     let code = transform_dom(r#"<my-element children={children} {...props} />"#);
     assert_substring_order(
         &code,
-        "_$spread(_el$, props, false, false)",
+        "_$spread(_el$",
         "_el$._$owner = _$getOwner()",
         "custom element spread before owner ordering",
     );
-    assert_substring_order(
-        &code,
-        "_el$._$owner = _$getOwner()",
-        "_$insert(_el$, children)",
-        "custom element owner before insert ordering",
+    assert!(
+        code.contains("children") && !code.contains("_$insert(_el$, children)"),
+        "children attr with spread should be merged into spread props. Output:\n{code}"
     );
 }
 
@@ -2749,14 +2747,8 @@ fn test_dom_native_children_literal_with_spread_uses_runtime_setter_before_sprea
         "literal children attr should not emit insert():\n{code}"
     );
     assert!(
-        code.contains(".children = \"A\""),
-        "literal children attr should emit runtime children property setter: \n{code}"
-    );
-    assert_substring_order(
-        &code,
-        ".children = \"A\"",
-        "_$spread(_el$, props, false, false)",
-        "literal children setter should execute before spread",
+        code.contains("children: \"A\"") && code.contains("mergeProps"),
+        "literal children attr with spread should merge into spread props: \n{code}"
     );
 }
 

@@ -134,11 +134,7 @@ pub fn generate_set_attr_expr_with_value<'a>(
     if key == "class" {
         let callee = helper_ident_expr(ast, span, "className");
         let args = if let Some(prev) = prev_value.take() {
-            let is_svg = ast.expression_boolean_literal(span, binding.is_svg);
-            ast.vec_from_array([elem.into(), value.into(), is_svg.into(), prev.into()])
-        } else if binding.is_svg {
-            let is_svg = ast.expression_boolean_literal(span, true);
-            ast.vec_from_array([elem.into(), value.into(), is_svg.into()])
+            ast.vec_from_array([elem.into(), value.into(), prev.into()])
         } else {
             ast.vec_from_array([elem.into(), value.into()])
         };

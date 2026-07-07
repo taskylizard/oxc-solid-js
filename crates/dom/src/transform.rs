@@ -861,6 +861,11 @@ fn extract_statement_position_iife<'a>(
     expr: &Expression<'a>,
     context: &BlockContext<'a>,
 ) -> Option<(Vec<Statement<'a>>, Expression<'a>)> {
+    let expr = match expr {
+        Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
+        expr => expr,
+    };
+
     let Expression::CallExpression(call) = expr else {
         return None;
     };
@@ -1388,19 +1393,22 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                 let template_lit = ast.template_literal(tmpl_span, quasis, ast.vec());
                 let template_expr = Expression::TemplateLiteral(ast.alloc(template_lit));
 
-                let needs_flags = tmpl.is_svg || tmpl.use_import_node || tmpl.is_math_ml;
-                let mut args = ast.vec_with_capacity(if needs_flags { 4 } else { 1 });
+                let template_flag = if tmpl.is_svg {
+                    Some(2.0)
+                } else if tmpl.use_import_node {
+                    Some(1.0)
+                } else {
+                    None
+                };
+                let mut args = ast.vec_with_capacity(if template_flag.is_some() { 2 } else { 1 });
                 args.push(Argument::from(template_expr));
-                if needs_flags {
-                    args.push(Argument::from(
-                        ast.expression_boolean_literal(tmpl_span, tmpl.use_import_node),
-                    ));
-                    args.push(Argument::from(
-                        ast.expression_boolean_literal(tmpl_span, tmpl.is_svg),
-                    ));
-                    args.push(Argument::from(
-                        ast.expression_boolean_literal(tmpl_span, tmpl.is_math_ml),
-                    ));
+                if let Some(flag) = template_flag {
+                    args.push(Argument::from(ast.expression_numeric_literal(
+                        tmpl_span,
+                        flag,
+                        None,
+                        oxc_syntax::number::NumberBase::Decimal,
+                    )));
                 }
 
                 let mut call = ast.expression_call(

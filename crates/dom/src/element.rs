@@ -1343,19 +1343,17 @@ fn process_spreads<'a, 'b>(
     elem_id: &str,
     context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
-    is_svg: bool,
+    ctx: &TraverseCtx<'a, ()>,
 ) -> (Vec<&'b JSXAttributeItem<'a>>, Option<Expression<'a>>) {
     let ast = context.ast();
     let mut filtered_attributes: Vec<&JSXAttributeItem<'a>> = Vec::new();
     let mut spread_args: Vec<Expression<'a>> = Vec::new();
     let mut running_props: Vec<ObjectPropertyKind<'a>> = Vec::new();
     let mut dynamic_spread = false;
-    let mut first_spread = false;
 
     for attr_item in &element.opening_element.attributes {
         match attr_item {
             JSXAttributeItem::SpreadAttribute(spread) => {
-                first_spread = true;
                 if !running_props.is_empty() {
                     let mut props = ast.vec_with_capacity(running_props.len());
                     for prop in running_props.drain(..) {
@@ -1412,7 +1410,10 @@ fn process_spreads<'a, 'b>(
                 let key = get_attr_name(&attr.name);
                 let has_static_marker =
                     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
-                        context.has_static_marker_comment(container.span, options.static_marker)
+                        context.has_static_marker_comment_anywhere(
+                            container.span,
+                            options.static_marker,
+                        )
                     } else {
                         false
                     };
@@ -1428,7 +1429,7 @@ fn process_spreads<'a, 'b>(
                         false
                     };
 
-                if (first_spread || dynamic) && can_native_spread(&key, true) {
+                if can_native_spread(&key, true) {
                     if dynamic {
                         let (prop_key, key_is_identifier) =
                             make_getter_prop_key(ast, attr.span, &key);
@@ -1468,16 +1469,20 @@ fn process_spreads<'a, 'b>(
                                 .map(|expr| {
                                     if has_static_marker {
                                         context.clone_expr_without_trivia(expr)
+                                    } else if let Some(static_value) =
+                                        evaluate_static_text_expression(expr, context, ctx)
+                                    {
+                                        ast.expression_string_literal(
+                                            attr.span,
+                                            ast.allocator.alloc_str(&static_value.as_text()),
+                                            None,
+                                        )
                                     } else {
                                         context.clone_expr(expr)
                                     }
                                 })
                                 .unwrap_or_else(|| ast.expression_identifier(SPAN, "undefined")),
-                            None => ast.expression_string_literal(
-                                SPAN,
-                                ast.allocator.alloc_str(""),
-                                None,
-                            ),
+                            None => ast.expression_boolean_literal(SPAN, true),
                             _ => ast.expression_identifier(SPAN, "undefined"),
                         };
                         running_props.push(ast.object_property_kind_object_property(
@@ -1530,8 +1535,7 @@ fn process_spreads<'a, 'b>(
     let callee = dom_helper_expr(context, ast, SPAN, "spread");
     let elem = ident_expr(ast, SPAN, elem_id);
     let has_children = ast.expression_boolean_literal(SPAN, !element.children.is_empty());
-    let is_svg = ast.expression_boolean_literal(SPAN, is_svg);
-    let spread_expr = call_expr(ast, SPAN, callee, [elem, props, is_svg, has_children]);
+    let spread_expr = call_expr(ast, SPAN, callee, [elem, props, has_children]);
 
     (filtered_attributes, Some(spread_expr))
 }
@@ -1574,7 +1578,7 @@ fn transform_attributes<'a>(
         let elem_id = elem_id
             .as_deref()
             .expect("Spread attributes require an element id");
-        let (filtered, spread) = process_spreads(element, elem_id, context, options, result.is_svg);
+        let (filtered, spread) = process_spreads(element, elem_id, context, options, ctx);
         attributes = filtered;
         spread_expr = spread;
         if spread_expr.is_some() && options.hydratable {
@@ -1909,6 +1913,10 @@ fn transform_attribute<'a>(
         return;
     }
 
+    if result.is_svg && key == "xmlns" {
+        return;
+    }
+
     // Handle different attribute types
     if key == "ref" {
         let elem_id = elem_id.expect("ref requires an element id");
@@ -2013,8 +2021,8 @@ fn transform_attribute<'a>(
     if key == "textContent" {
         if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
             if let Some(expr) = container.expression.as_expression() {
-                let has_static_marker =
-                    context.has_static_marker_comment(container.span, options.static_marker);
+                let has_static_marker = context
+                    .has_static_marker_comment_anywhere(container.span, options.static_marker);
                 if !has_children && !has_static_marker && is_dynamic(expr) {
                     let elem_id = elem_id.expect("textContent requires an element id");
                     let text_id = context.generate_uid("el$");
@@ -2084,8 +2092,8 @@ fn transform_attribute<'a>(
         }
         Some(JSXAttributeValue::ExpressionContainer(container)) => {
             if let Some(expr) = container.expression.as_expression() {
-                let has_static_marker =
-                    context.has_static_marker_comment(container.span, options.static_marker);
+                let has_static_marker = context
+                    .has_static_marker_comment_anywhere(container.span, options.static_marker);
                 let mut dynamic_expr = !has_static_marker && is_dynamic(expr);
                 if !has_static_marker
                     && (key == "class" || key == "style")
@@ -2283,18 +2291,22 @@ fn transform_ref<'a>(
         if let Some(expr) = container.expression.as_expression() {
             let elem = ident_expr(ast, attr.span, elem_id);
 
-            // Function refs are invoked through `use` helper for parity with Babel.
             if matches!(
                 expr,
-                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+                Expression::ArrowFunctionExpression(_)
+                    | Expression::FunctionExpression(_)
+                    | Expression::ArrayExpression(_)
             ) || !is_writable_ref_target(expr, ctx)
             {
-                let use_callee = dom_helper_expr(context, ast, attr.span, "use");
+                let ref_callee = dom_helper_expr(context, ast, attr.span, "ref");
                 result.exprs.push(call_expr(
                     ast,
                     attr.span,
-                    use_callee,
-                    [context.clone_expr(expr), elem],
+                    ref_callee,
+                    [
+                        arrow_zero_params_return_expr(ast, attr.span, context.clone_expr(expr)),
+                        elem,
+                    ],
                 ));
                 return;
             }
@@ -2336,14 +2348,31 @@ fn transform_ref<'a>(
                 BinaryOperator::StrictEquality,
                 function_str,
             );
-
-            let use_callee = dom_helper_expr(context, ast, attr.span, "use");
-            let use_call = call_expr(
+            let array_is_array = static_member(
                 ast,
                 attr.span,
-                use_callee,
+                ident_expr(ast, attr.span, "Array"),
+                "isArray",
+            );
+            let array_test = call_expr(
+                ast,
+                attr.span,
+                array_is_array,
+                [ref_ident.clone_in(ast.allocator)],
+            );
+            let callable_test = ast.expression_logical(SPAN, test, LogicalOperator::Or, array_test);
+
+            let ref_callee = dom_helper_expr(context, ast, attr.span, "ref");
+            let ref_call = call_expr(
+                ast,
+                attr.span,
+                ref_callee,
                 [
-                    ref_ident.clone_in(ast.allocator),
+                    arrow_zero_params_return_expr(
+                        ast,
+                        attr.span,
+                        ref_ident.clone_in(ast.allocator),
+                    ),
                     elem.clone_in(ast.allocator),
                 ],
             );
@@ -2351,15 +2380,18 @@ fn transform_ref<'a>(
             if let Some(target) = expression_to_assignment_target(context.clone_expr(expr)) {
                 let assign =
                     ast.expression_assignment(SPAN, AssignmentOperator::Assign, target, elem);
-                result
-                    .exprs
-                    .push(ast.expression_conditional(SPAN, test, use_call, assign));
+                result.exprs.push(ast.expression_conditional(
+                    SPAN,
+                    callable_test,
+                    ref_call,
+                    assign,
+                ));
             } else {
                 result.exprs.push(ast.expression_logical(
                     SPAN,
-                    test,
+                    callable_test,
                     LogicalOperator::And,
-                    use_call,
+                    ref_call,
                 ));
             }
         }
@@ -2547,8 +2579,7 @@ fn transform_event<'a>(
             return;
         }
 
-        context.register_helper("addEventListener");
-        let callee = ident_expr(ast, attr.span, "addEventListener");
+        let callee = dom_helper_expr(context, ast, attr.span, "addEvent");
         let delegate = ast.expression_boolean_literal(SPAN, true);
         result.exprs.push(call_expr(
             ast,
@@ -2607,8 +2638,7 @@ fn transform_event<'a>(
         return;
     }
 
-    context.register_helper("addEventListener");
-    let callee = ident_expr(ast, attr.span, "addEventListener");
+    let callee = dom_helper_expr(context, ast, attr.span, "addEvent");
     result.exprs.push(call_expr(
         ast,
         attr.span,
@@ -3166,39 +3196,42 @@ fn transform_style<'a>(
                     for prop in &obj.properties {
                         let mut keep_prop = true;
 
-                        if !result.is_svg {
-                            if let ObjectPropertyKind::ObjectProperty(object_prop) = prop {
-                                if !object_prop.computed {
-                                    let string_key = match &object_prop.key {
-                                        PropertyKey::StringLiteral(lit) => Some(lit.value.as_str()),
-                                        _ => None,
-                                    };
+                        if let ObjectPropertyKind::ObjectProperty(object_prop) = prop {
+                            if !object_prop.computed {
+                                let string_key = match &object_prop.key {
+                                    PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+                                    PropertyKey::StringLiteral(lit) => Some(lit.value.as_str()),
+                                    _ => None,
+                                };
 
-                                    match &object_prop.value {
-                                        Expression::StringLiteral(lit) => {
-                                            if let Some(key) = string_key {
-                                                inline_styles
-                                                    .push(format!("{}: {}", key, lit.value));
-                                                keep_prop = false;
-                                            }
-                                        }
-                                        Expression::NumericLiteral(num) => {
-                                            if let Some(key) = string_key {
-                                                inline_styles
-                                                    .push(format!("{}: {}", key, num.value));
-                                                keep_prop = false;
-                                            }
-                                        }
-                                        Expression::NullLiteral(_) => {
+                                match &object_prop.value {
+                                    Expression::StringLiteral(lit) => {
+                                        if let Some(key) = string_key {
+                                            inline_styles.push(format!(
+                                                "{}:{}",
+                                                camel_to_kebab(key),
+                                                lit.value
+                                            ));
                                             keep_prop = false;
                                         }
-                                        Expression::Identifier(ident)
-                                            if ident.name == "undefined" =>
-                                        {
-                                            keep_prop = false;
-                                        }
-                                        _ => {}
                                     }
+                                    Expression::NumericLiteral(num) => {
+                                        if let Some(key) = string_key {
+                                            inline_styles.push(format!(
+                                                "{}:{}",
+                                                camel_to_kebab(key),
+                                                num.value
+                                            ));
+                                            keep_prop = false;
+                                        }
+                                    }
+                                    Expression::NullLiteral(_) => {
+                                        keep_prop = false;
+                                    }
+                                    Expression::Identifier(ident) if ident.name == "undefined" => {
+                                        keep_prop = false;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
@@ -3208,8 +3241,8 @@ fn transform_style<'a>(
                         }
                     }
 
-                    if !result.is_svg && !inline_styles.is_empty() {
-                        let inline_style = inline_styles.join("; ");
+                    if !inline_styles.is_empty() {
+                        let inline_style = inline_styles.join(";");
                         inline_attribute_on_template(
                             result,
                             result.is_svg,
@@ -3413,55 +3446,6 @@ fn camel_to_kebab(s: &str) -> String {
         }
     }
     result
-}
-
-/// Check if a CSS property needs px suffix for numeric values
-fn needs_px_suffix(prop: &str) -> bool {
-    // Properties that don't need px suffix
-    let unitless = [
-        "animation-iteration-count",
-        "border-image-outset",
-        "border-image-slice",
-        "border-image-width",
-        "box-flex",
-        "box-flex-group",
-        "box-ordinal-group",
-        "column-count",
-        "columns",
-        "flex",
-        "flex-grow",
-        "flex-positive",
-        "flex-shrink",
-        "flex-negative",
-        "flex-order",
-        "grid-row",
-        "grid-row-end",
-        "grid-row-span",
-        "grid-row-start",
-        "grid-column",
-        "grid-column-end",
-        "grid-column-span",
-        "grid-column-start",
-        "font-weight",
-        "line-clamp",
-        "line-height",
-        "opacity",
-        "order",
-        "orphans",
-        "tab-size",
-        "widows",
-        "z-index",
-        "zoom",
-        "fill-opacity",
-        "flood-opacity",
-        "stop-opacity",
-        "stroke-dasharray",
-        "stroke-dashoffset",
-        "stroke-miterlimit",
-        "stroke-opacity",
-        "stroke-width",
-    ];
-    !unitless.contains(&prop)
 }
 
 /// Transform innerHTML/textContent/innerText
