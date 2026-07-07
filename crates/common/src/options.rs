@@ -145,7 +145,7 @@ impl<'a> TransformOptions<'a> {
             filename: "input.jsx",
             source_type: SourceType::tsx(),
             source_map: false,
-            static_marker: "@once",
+            static_marker: "@static",
             validate: true,
             hmr: false,
             hmr_bundler: "standard",

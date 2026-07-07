@@ -1164,8 +1164,8 @@ fn test_dom_fragment_multi_child_memo_wraps_dynamic_expression_entries() {
 fn test_dom_insert_children_static_marker_keeps_direct_value_forms() {
     let code = transform_dom(
         r#"
-        const template11 = <module children={/*@once*/ state.children} />;
-        const template12 = <Module children={/*@once*/ state.children} />;
+        const template11 = <module children={/*@static*/ state.children} />;
+        const template12 = <Module children={/*@static*/ state.children} />;
         "#,
     );
     assert!(

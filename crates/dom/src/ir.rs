@@ -416,7 +416,7 @@ impl<'a> BlockContext<'a> {
 
     /// Clone an expression while dropping source trivia attachment.
     ///
-    /// This is used for static-marker (`/*@once*/`) paths where we want the
+    /// This is used for static-marker (`/*@static*/`) paths where we want the
     /// static semantics but should not re-emit the marker comment in runtime calls.
     pub fn clone_expr_without_trivia(&self, expr: &Expression<'a>) -> Expression<'a> {
         let mut cloned = expr.clone_in(self.allocator);
@@ -447,7 +447,7 @@ impl<'a> BlockContext<'a> {
             return false;
         }
 
-        // Match only a *leading* marker comment (`/*@once*/`) for the spanned expression.
+        // Match only a *leading* marker comment (`/*@static*/`) for the spanned expression.
         // This avoids treating nested markers (e.g. one property inside an object literal)
         // as if they marked the whole container.
         let bytes = snippet.as_bytes();

@@ -532,7 +532,7 @@ fn base_options(module_name: &'static str, generate: GenerateMode) -> SuiteOptio
         built_ins: &BUILT_INS,
         effect_wrapper: "effect",
         memo_wrapper: "memo",
-        static_marker: "@once",
+        static_marker: "@static",
         require_import_source: None,
         validate: true,
     }
