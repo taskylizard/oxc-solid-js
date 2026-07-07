@@ -125,6 +125,7 @@ pub struct DynamicBinding<'a> {
 pub enum StaticTextValue {
     String(String),
     Number(f64),
+    Boolean(bool),
 }
 
 impl StaticTextValue {
@@ -138,6 +139,7 @@ impl StaticTextValue {
                     value.to_string()
                 }
             }
+            Self::Boolean(value) => value.to_string(),
         }
     }
 }

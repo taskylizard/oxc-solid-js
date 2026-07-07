@@ -12,7 +12,6 @@ use crate::ir::{
 };
 use crate::output_helpers::{
     arrow_zero_params_body, call_expr, get_numbered_id, ident_expr, inline_effect_source_expr,
-    static_member,
 };
 use crate::universal_output::build_universal_output_expr;
 

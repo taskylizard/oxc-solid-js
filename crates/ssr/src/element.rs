@@ -726,6 +726,7 @@ fn transform_attributes<'a>(
     let mut class_namespace_indices: Vec<usize> = Vec::new();
     let mut style_attr_index: Option<usize> = None;
     let mut class_attr_index: Option<usize> = None;
+    let mut class_attr_indices: Vec<usize> = Vec::new();
 
     for (index, item) in element.opening_element.attributes.iter().enumerate() {
         let JSXAttributeItem::Attribute(attr) = item else {
@@ -736,8 +737,9 @@ fn transform_attributes<'a>(
         if style_attr_index.is_none() && key == "style" {
             style_attr_index = Some(index);
         }
-        if class_attr_index.is_none() && key == "class" {
+        if key == "class" {
             class_attr_index = Some(index);
+            class_attr_indices.push(index);
         }
 
         if let Some(prop_name) = key.strip_prefix("style:") {
@@ -806,8 +808,13 @@ fn transform_attributes<'a>(
         let JSXAttributeItem::Attribute(attr) = item else {
             continue;
         };
+        let key = get_attr_name(&attr.name);
 
         if class_removed_by_stale_splice.contains(&index) {
+            continue;
+        }
+
+        if key == "class" && class_attr_indices.len() > 1 && Some(index) != class_attr_index {
             continue;
         }
 
@@ -1507,7 +1514,7 @@ fn transform_expression_attribute<'a>(
             ));
             let body = ast.alloc_function_body(SPAN, ast.vec(), statements);
             let arrow = ast.expression_arrow_function(SPAN, true, false, NONE, params, NONE, body);
-            class_expr = hoist_expression(context, result, arrow, true, false, false);
+            class_expr = hoist_expression(context, result, arrow, false, false, true);
         }
         result.push_template_part("\"");
         result.push_template_value(class_expr);

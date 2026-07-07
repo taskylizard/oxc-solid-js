@@ -25,7 +25,7 @@ use common::{
 
 use crate::component::transform_component;
 use crate::conditional::{is_condition_expression, transform_condition_inline_expr};
-use crate::element::{evaluate_static_text_expression, transform_element};
+use crate::element::{evaluate_static_value_expression, transform_element};
 use crate::ir::{
     helper_ident_expr, helper_local_name, template_var_name, BlockContext, TransformResult,
 };
@@ -1056,7 +1056,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
             return;
         };
 
-        if let Some(value) = evaluate_static_text_expression(init, &self.context, ctx) {
+        if let Some(value) = evaluate_static_value_expression(init, &self.context, ctx) {
             self.context.set_constant_text_value(symbol_id, value);
         }
     }

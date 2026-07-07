@@ -1,10 +1,8 @@
-use oxc_ast::ast::{
-    Argument, Expression, FormalParameterKind, LogicalExpression, Statement,
-    VariableDeclarationKind,
-};
+use oxc_allocator::CloneIn;
+use oxc_ast::ast::{Argument, Expression, FormalParameterKind, Statement, VariableDeclarationKind};
 use oxc_ast::{AstBuilder, NONE};
 use oxc_span::{Span, SPAN};
-use oxc_syntax::operator::{LogicalOperator, UnaryOperator};
+use oxc_syntax::operator::{BinaryOperator, LogicalOperator, UnaryOperator};
 
 use common::is_dynamic;
 
@@ -123,13 +121,10 @@ fn transform_condition_internal<'a>(
             }
         }
         Expression::LogicalExpression(logical) => {
-            let mut logical = logical.unbox();
-            let hoisted = transform_logical_condition(&mut logical, context, inline);
+            let mut expr = Expression::LogicalExpression(ast.alloc(logical.unbox()));
+            let hoisted = transform_logical_condition(&mut expr, context, inline);
 
-            TransformConditionResult {
-                expr: Expression::LogicalExpression(ast.alloc(logical)),
-                hoisted,
-            }
+            TransformConditionResult { expr, hoisted }
         }
         _ => TransformConditionResult {
             expr,
@@ -139,12 +134,15 @@ fn transform_condition_internal<'a>(
 }
 
 fn transform_logical_condition<'a>(
-    logical: &mut LogicalExpression<'a>,
+    expr: &mut Expression<'a>,
     context: &BlockContext<'a>,
     inline: bool,
 ) -> Option<HoistedMemo<'a>> {
     let ast = context.ast();
-    let target = find_and_target(logical)?;
+    let target_expr = find_and_target_expression(expr)?;
+    let Expression::LogicalExpression(target) = target_expr else {
+        return None;
+    };
 
     if !is_dynamic_condition_expr(&target.right) || !is_dynamic_condition_expr(&target.left) {
         return None;
@@ -152,41 +150,73 @@ fn transform_logical_condition<'a>(
 
     let span = target.span;
     let left = std::mem::replace(&mut target.left, ident_expr(ast, span, "undefined"));
-    let condition = normalize_test_condition(ast, span, left);
+    let left_is_boolean = is_boolean_expression(&left);
+    let condition = normalize_test_condition(ast, span, left.clone_in(ast.allocator));
 
-    if inline {
+    let (memo_call, hoisted) = if inline {
         let memo = memo_getter_expr(ast, span, condition, context);
-        target.left = call_expr(ast, span, memo, []);
-        None
+        (call_expr(ast, span, memo, []), None)
     } else {
         let id = context.generate_uid("c$");
-        target.left = call_expr(ast, span, ident_expr(ast, span, &id), []);
-        Some(HoistedMemo {
-            id,
-            cond: condition,
-        })
+        (
+            call_expr(ast, span, ident_expr(ast, span, &id), []),
+            Some(HoistedMemo {
+                id,
+                cond: condition,
+            }),
+        )
+    };
+
+    if left_is_boolean {
+        target.left = memo_call;
+    } else {
+        let right = std::mem::replace(&mut target.right, ident_expr(ast, span, "undefined"));
+        *target_expr = ast.expression_conditional(span, memo_call, right, left);
     }
+
+    hoisted
 }
 
-fn find_and_target<'a, 'b>(
-    logical: &'b mut LogicalExpression<'a>,
-) -> Option<&'b mut LogicalExpression<'a>> {
-    if logical.operator == LogicalOperator::And {
-        return Some(logical);
-    }
-
-    find_and_target_in_expression(&mut logical.left)
-}
-
-fn find_and_target_in_expression<'a, 'b>(
+fn find_and_target_expression<'a, 'b>(
     expr: &'b mut Expression<'a>,
-) -> Option<&'b mut LogicalExpression<'a>> {
+) -> Option<&'b mut Expression<'a>> {
+    if matches!(expr, Expression::LogicalExpression(logical) if logical.operator == LogicalOperator::And)
+    {
+        return Some(expr);
+    }
+
     match expr {
-        Expression::LogicalExpression(logical) => find_and_target(logical),
+        Expression::LogicalExpression(logical) => find_and_target_expression(&mut logical.left),
         Expression::ParenthesizedExpression(paren) => {
-            find_and_target_in_expression(&mut paren.expression)
+            find_and_target_expression(&mut paren.expression)
         }
         _ => None,
+    }
+}
+
+fn is_boolean_expression(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::BooleanLiteral(_) => true,
+        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::LogicalNot,
+        Expression::BinaryExpression(binary) => matches!(
+            binary.operator,
+            BinaryOperator::Equality
+                | BinaryOperator::Inequality
+                | BinaryOperator::StrictEquality
+                | BinaryOperator::StrictInequality
+                | BinaryOperator::LessThan
+                | BinaryOperator::LessEqualThan
+                | BinaryOperator::GreaterThan
+                | BinaryOperator::GreaterEqualThan
+                | BinaryOperator::Instanceof
+                | BinaryOperator::In
+        ),
+        Expression::ParenthesizedExpression(paren) => is_boolean_expression(&paren.expression),
+        Expression::TSAsExpression(ts) => is_boolean_expression(&ts.expression),
+        Expression::TSSatisfiesExpression(ts) => is_boolean_expression(&ts.expression),
+        Expression::TSNonNullExpression(ts) => is_boolean_expression(&ts.expression),
+        Expression::TSTypeAssertion(ts) => is_boolean_expression(&ts.expression),
+        _ => false,
     }
 }
 
@@ -195,7 +225,7 @@ fn normalize_test_condition<'a>(
     span: Span,
     expr: Expression<'a>,
 ) -> Expression<'a> {
-    if matches!(expr, Expression::BinaryExpression(_)) {
+    if is_boolean_expression(&expr) {
         expr
     } else {
         bool_cast_expr(ast, span, expr)

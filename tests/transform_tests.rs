@@ -1017,11 +1017,9 @@ fn test_dom_insert_wrap_conditionals_preserves_or_fallback_shape() {
         "Expected logical-AND predicate memoization in (a && b) || c form, got:\n{code}"
     );
     assert!(
-        code.contains("(_c$() && good()) || bad")
-            || code.contains("(_c$2() && good()) || bad")
-            || code.contains("_c$() && good() || bad")
-            || code.contains("_c$2() && good() || bad"),
-        "Expected wrapped && branch to preserve || fallback shape, got:\n{code}"
+        code.contains("(_c$() ? good() : state.dynamic) || bad")
+            || code.contains("(_c$2() ? good() : state.dynamic) || bad"),
+        "Expected wrapped && branch to preserve || fallback value shape, got:\n{code}"
     );
 }
 
@@ -1034,9 +1032,9 @@ fn test_dom_insert_wrap_conditionals_preserves_nullish_chain_shape() {
         "Expected nullish-chain left && predicate memoization, got:\n{code}"
     );
     assert!(
-        code.contains("(_c$() && thing1()) ?? thing2() ?? thing3()")
-            || code.contains("(_c$2() && thing1()) ?? thing2() ?? thing3()"),
-        "Expected wrapped && segment to remain parenthesized inside ?? chain, got:\n{code}"
+        code.contains("(_c$() ? thing1() : thing()) ?? thing2() ?? thing3()")
+            || code.contains("(_c$2() ? thing1() : thing()) ?? thing2() ?? thing3()"),
+        "Expected wrapped && segment to preserve fallback value inside ?? chain, got:\n{code}"
     );
 }
 

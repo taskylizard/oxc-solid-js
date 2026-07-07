@@ -277,6 +277,51 @@ fn should_keep_conditional_insert_static(expr: &Expression<'_>) -> bool {
         && is_static_insert_branch(&cond.alternate)
 }
 
+fn can_return_hydratable_child(expr: &Expression<'_>) -> bool {
+    match unwrap_ts_expression(expr) {
+        Expression::JSXElement(_) | Expression::JSXFragment(_) | Expression::CallExpression(_) => {
+            true
+        }
+        Expression::StaticMemberExpression(member) => member.property.name == "children",
+        Expression::ChainExpression(chain) => match &chain.expression {
+            oxc_ast::ast::ChainElement::StaticMemberExpression(member) => {
+                member.property.name == "children"
+            }
+            _ => false,
+        },
+        Expression::ConditionalExpression(cond) => {
+            can_return_hydratable_child(&cond.consequent)
+                || can_return_hydratable_child(&cond.alternate)
+        }
+        Expression::LogicalExpression(logical) => can_return_hydratable_child(&logical.right),
+        _ => false,
+    }
+}
+
+fn scope_hydratable_insert_value<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    expr: &Expression<'a>,
+    context: &BlockContext<'a>,
+    options: &TransformOptions<'a>,
+) -> Option<Expression<'a>> {
+    if !options.hydratable || !is_dynamic(expr) || !can_return_hydratable_child(expr) {
+        return None;
+    }
+
+    context.register_helper("scope");
+    let value = if options.wrap_conditionals
+        && memo_wrapper_enabled(options)
+        && is_condition_expression(expr)
+    {
+        transform_condition_non_inline_insert(context.clone_expr(expr), span, context)
+    } else {
+        arrow_zero_params_return_expr(ast, span, context.clone_expr(expr))
+    };
+    let callee = dom_helper_expr(context, ast, span, "scope");
+    Some(call_expr(ast, span, callee, [value]))
+}
+
 fn normalize_insert_value<'a>(
     ast: AstBuilder<'a>,
     span: Span,
@@ -284,6 +329,10 @@ fn normalize_insert_value<'a>(
     context: &BlockContext<'a>,
     options: &TransformOptions<'a>,
 ) -> Expression<'a> {
+    if let Some(value) = scope_hydratable_insert_value(ast, span, expr, context, options) {
+        return value;
+    }
+
     if let Expression::CallExpression(call) = expr {
         if call.arguments.is_empty()
             && !matches!(
@@ -481,6 +530,7 @@ impl StaticPrimitiveValue {
         match value {
             StaticTextValue::String(value) => Self::String(value),
             StaticTextValue::Number(value) => Self::Number(value),
+            StaticTextValue::Boolean(value) => Self::Boolean(value),
         }
     }
 
@@ -489,6 +539,15 @@ impl StaticPrimitiveValue {
             Self::String(value) => Some(StaticTextValue::String(value)),
             Self::Number(value) => Some(StaticTextValue::Number(value)),
             Self::Boolean(_) | Self::Null | Self::Undefined => None,
+        }
+    }
+
+    fn into_static_value(self) -> Option<StaticTextValue> {
+        match self {
+            Self::String(value) => Some(StaticTextValue::String(value)),
+            Self::Number(value) => Some(StaticTextValue::Number(value)),
+            Self::Boolean(value) => Some(StaticTextValue::Boolean(value)),
+            Self::Null | Self::Undefined => None,
         }
     }
 
@@ -867,6 +926,14 @@ pub(crate) fn evaluate_static_text_expression<'a>(
     evaluate_static_primitive_expression(expr, context, ctx)?.into_static_text_value()
 }
 
+pub(crate) fn evaluate_static_value_expression<'a>(
+    expr: &Expression<'a>,
+    context: &BlockContext<'a>,
+    ctx: &TraverseCtx<'a, ()>,
+) -> Option<StaticTextValue> {
+    evaluate_static_primitive_expression(expr, context, ctx)?.into_static_value()
+}
+
 pub(crate) fn static_child_text<'a>(
     expr: &Expression<'a>,
     context: &BlockContext<'a>,
@@ -1222,122 +1289,6 @@ fn element_needs_runtime_access(element: &JSXElement, options: &TransformOptions
     false
 }
 
-enum MergedClass<'a> {
-    Static(String),
-    Dynamic(Expression<'a>),
-}
-
-fn build_merged_class_value<'a>(
-    ast: AstBuilder<'a>,
-    context: &BlockContext<'a>,
-    class_attrs: &[&JSXAttribute<'a>],
-) -> Option<MergedClass<'a>> {
-    enum ClassPart<'a> {
-        Static(String),
-        Dynamic(Expression<'a>),
-    }
-
-    let mut parts: Vec<ClassPart<'a>> = Vec::new();
-
-    for attr in class_attrs {
-        match &attr.value {
-            Some(JSXAttributeValue::StringLiteral(lit)) => {
-                parts.push(ClassPart::Static(lit.value.to_string()));
-            }
-            Some(JSXAttributeValue::ExpressionContainer(container)) => {
-                if let Some(expr) = container.expression.as_expression() {
-                    match expr {
-                        Expression::StringLiteral(lit) => {
-                            parts.push(ClassPart::Static(lit.value.to_string()));
-                        }
-                        Expression::NumericLiteral(num) => {
-                            parts.push(ClassPart::Static(num.value.to_string()));
-                        }
-                        Expression::NullLiteral(_) => {}
-                        Expression::Identifier(ident) if ident.name == "undefined" => {}
-                        _ => parts.push(ClassPart::Dynamic(context.clone_expr(expr))),
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if parts.is_empty() {
-        return None;
-    }
-
-    let has_dynamic = parts
-        .iter()
-        .any(|part| matches!(part, ClassPart::Dynamic(_)));
-    if !has_dynamic {
-        let merged = parts
-            .into_iter()
-            .filter_map(|part| match part {
-                ClassPart::Static(value) if !value.is_empty() => Some(value),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        return Some(MergedClass::Static(merged));
-    }
-
-    let mut values = ast.vec();
-    let mut quasis_raw: Vec<String> = vec![String::new()];
-
-    let parts_len = parts.len();
-    for (index, part) in parts.into_iter().enumerate() {
-        let is_last = index + 1 == parts_len;
-        match part {
-            ClassPart::Static(value) => {
-                let mut last = quasis_raw.pop().unwrap_or_default();
-                if !value.is_empty() {
-                    if !last.is_empty() && !last.ends_with(' ') {
-                        last.push(' ');
-                    }
-                    last.push_str(&value);
-                    if !is_last {
-                        last.push(' ');
-                    }
-                }
-                quasis_raw.push(last);
-            }
-            ClassPart::Dynamic(expr) => {
-                let empty = ast.expression_string_literal(SPAN, ast.allocator.alloc_str(""), None);
-                let or_expr = Expression::LogicalExpression(ast.alloc_logical_expression(
-                    SPAN,
-                    expr,
-                    LogicalOperator::Or,
-                    empty,
-                ));
-                values.push(or_expr);
-                quasis_raw.push(if is_last {
-                    String::new()
-                } else {
-                    " ".to_string()
-                });
-            }
-        }
-    }
-
-    let quasis_len = quasis_raw.len();
-    let mut quasis = ast.vec_with_capacity(quasis_len);
-    for (index, raw) in quasis_raw.into_iter().enumerate() {
-        let is_tail = index + 1 == quasis_len;
-        let raw_str = ast.allocator.alloc_str(&raw);
-        let value = TemplateElementValue {
-            raw: ast.str(raw_str),
-            cooked: Some(ast.str(raw_str)),
-        };
-        quasis.push(ast.template_element(SPAN, value, is_tail));
-    }
-
-    let template = ast.template_literal(SPAN, quasis, values);
-    Some(MergedClass::Dynamic(Expression::TemplateLiteral(
-        ast.alloc(template),
-    )))
-}
-
 fn process_spreads<'a, 'b>(
     element: &'b JSXElement<'a>,
     elem_id: &str,
@@ -1553,7 +1504,6 @@ fn transform_attributes<'a>(
     options: &TransformOptions<'a>,
     ctx: &TraverseCtx<'a, ()>,
 ) -> AttributeTransformResult<'a> {
-    let ast = context.ast();
     let elem_id = result.id.clone();
     let mut class_attrs = Vec::new();
     let mut class_name_attrs = Vec::new();
@@ -1634,41 +1584,17 @@ fn transform_attributes<'a>(
                 &mut needs_text_content_placeholder,
                 &mut needs_spacing,
             ),
-            _ => {
-                let Some(merged) = build_merged_class_value(ast, context, &class_attrs) else {
-                    return AttributeTransformResult {
-                        needs_text_content_placeholder,
-                        synthetic_children,
-                    };
-                };
-                match merged {
-                    MergedClass::Static(value) => {
-                        if !value.is_empty() {
-                            inline_attribute_on_template(
-                                result,
-                                result.is_svg,
-                                "class",
-                                Some(value.as_str()),
-                                options.omit_quotes,
-                                &mut needs_spacing,
-                            );
-                        }
-                    }
-                    MergedClass::Dynamic(expr) => {
-                        let elem_id = elem_id
-                            .as_deref()
-                            .expect("dynamic class requires an element id");
-                        result.dynamics.push(DynamicBinding {
-                            elem: elem_id.to_string(),
-                            key: "class".to_string(),
-                            value: expr,
-                            is_svg: result.is_svg,
-                            is_ce: result.has_custom_element,
-                            tag_name: result.tag_name.clone().unwrap_or_default(),
-                        });
-                    }
-                }
-            }
+            _ => transform_attribute(
+                class_attrs[class_attrs.len() - 1],
+                elem_id.as_deref(),
+                result,
+                context,
+                options,
+                ctx,
+                has_children,
+                &mut needs_text_content_placeholder,
+                &mut needs_spacing,
+            ),
         }
     }
 
@@ -1690,11 +1616,7 @@ fn transform_attributes<'a>(
                                     container.span,
                                     options.static_marker,
                                 );
-                                let value = if has_static_marker {
-                                    context.clone_expr_without_trivia(expr)
-                                } else {
-                                    context.clone_expr(expr)
-                                };
+                                let value = context.clone_expr(expr);
                                 non_primitive_children_expr = Some((value, has_static_marker));
                             }
                         }
@@ -1779,41 +1701,17 @@ fn transform_attributes<'a>(
                 &mut needs_text_content_placeholder,
                 &mut needs_spacing,
             ),
-            _ => {
-                let Some(merged) = build_merged_class_value(ast, context, &class_attrs) else {
-                    return AttributeTransformResult {
-                        needs_text_content_placeholder,
-                        synthetic_children,
-                    };
-                };
-                match merged {
-                    MergedClass::Static(value) => {
-                        if !value.is_empty() {
-                            inline_attribute_on_template(
-                                result,
-                                result.is_svg,
-                                "class",
-                                Some(value.as_str()),
-                                options.omit_quotes,
-                                &mut needs_spacing,
-                            );
-                        }
-                    }
-                    MergedClass::Dynamic(expr) => {
-                        let elem_id = elem_id
-                            .as_deref()
-                            .expect("dynamic class requires an element id");
-                        result.dynamics.push(DynamicBinding {
-                            elem: elem_id.to_string(),
-                            key: "class".to_string(),
-                            value: expr,
-                            is_svg: result.is_svg,
-                            is_ce: result.has_custom_element,
-                            tag_name: result.tag_name.clone().unwrap_or_default(),
-                        });
-                    }
-                }
-            }
+            _ => transform_attribute(
+                class_attrs[class_attrs.len() - 1],
+                elem_id.as_deref(),
+                result,
+                context,
+                options,
+                ctx,
+                has_children,
+                &mut needs_text_content_placeholder,
+                &mut needs_spacing,
+            ),
         }
     }
 
@@ -1981,17 +1879,35 @@ fn transform_attribute<'a>(
 
     if key == "class" {
         if let Some(JSXAttributeValue::ExpressionContainer(container)) = &attr.value {
-            if let Some(Expression::ObjectExpression(obj)) = container.expression.as_expression() {
-                let elem_id = elem_id.expect("class requires an element id");
-                if transform_class_object(
-                    obj,
-                    elem_id,
-                    result,
-                    context,
-                    options.omit_quotes,
-                    needs_spacing,
-                ) {
-                    return;
+            if let Some(expr) = container.expression.as_expression() {
+                if let Expression::ObjectExpression(obj) = expr {
+                    let elem_id = elem_id.expect("class requires an element id");
+                    if transform_class_object(
+                        obj,
+                        elem_id,
+                        result,
+                        context,
+                        ctx,
+                        options.omit_quotes,
+                        needs_spacing,
+                    ) {
+                        return;
+                    }
+                }
+
+                if let Expression::ArrayExpression(array) = expr {
+                    let elem_id = elem_id.expect("class requires an element id");
+                    if transform_class_array(
+                        array,
+                        elem_id,
+                        result,
+                        context,
+                        ctx,
+                        options.omit_quotes,
+                        needs_spacing,
+                    ) {
+                        return;
+                    }
                 }
             }
         }
@@ -2914,11 +2830,79 @@ fn transform_class_object<'a>(
     elem_id: &str,
     result: &mut TransformResult<'a>,
     context: &BlockContext<'a>,
+    ctx: &TraverseCtx<'a, ()>,
     omit_quotes: bool,
     needs_spacing: &mut bool,
 ) -> bool {
-    let ast = context.ast();
+    transform_class_object_with_static(
+        obj,
+        elem_id,
+        result,
+        context,
+        ctx,
+        omit_quotes,
+        needs_spacing,
+        Vec::new(),
+    )
+}
+
+fn transform_class_array<'a>(
+    array: &oxc_ast::ast::ArrayExpression<'a>,
+    elem_id: &str,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
+    ctx: &TraverseCtx<'a, ()>,
+    omit_quotes: bool,
+    needs_spacing: &mut bool,
+) -> bool {
     let mut static_classes = Vec::new();
+    let mut class_object = None;
+
+    for element in &array.elements {
+        let Some(expr) = element.as_expression() else {
+            return false;
+        };
+
+        match unwrap_ts_expression(expr) {
+            Expression::StringLiteral(lit) if class_object.is_none() => {
+                if !lit.value.is_empty() {
+                    static_classes.push(lit.value.to_string());
+                }
+            }
+            Expression::ObjectExpression(obj) if class_object.is_none() => {
+                class_object = Some(obj);
+            }
+            _ => return false,
+        }
+    }
+
+    let Some(class_object) = class_object else {
+        return false;
+    };
+
+    transform_class_object_with_static(
+        class_object,
+        elem_id,
+        result,
+        context,
+        ctx,
+        omit_quotes,
+        needs_spacing,
+        static_classes,
+    )
+}
+
+fn transform_class_object_with_static<'a>(
+    obj: &oxc_ast::ast::ObjectExpression<'a>,
+    elem_id: &str,
+    result: &mut TransformResult<'a>,
+    context: &BlockContext<'a>,
+    ctx: &TraverseCtx<'a, ()>,
+    omit_quotes: bool,
+    needs_spacing: &mut bool,
+    mut static_classes: Vec<String>,
+) -> bool {
+    let ast = context.ast();
 
     for prop in &obj.properties {
         let ObjectPropertyKind::ObjectProperty(prop) = prop else {
@@ -2958,7 +2942,11 @@ fn transform_class_object<'a>(
             Expression::NullLiteral(_) => {}
             Expression::Identifier(ident) if ident.name == "undefined" => {}
             other => {
-                if is_dynamic(other) {
+                if let Some(value) = evaluate_static_primitive_expression(other, context, ctx) {
+                    if value.is_truthy() {
+                        static_classes.push(class_name.to_string());
+                    }
+                } else if is_dynamic(other) {
                     result.dynamics.push(DynamicBinding {
                         elem: elem_id.to_string(),
                         key: format!("class:{}", class_name),
@@ -4618,7 +4606,7 @@ fn transform_children<'a, 'b>(
                         *last_was_text = false;
 
                         let insert_value = if has_static_marker {
-                            context.clone_expr_without_trivia(expr)
+                            context.clone_expr(expr)
                         } else {
                             normalize_insert_value(ast, container.span, expr, context, options)
                         };
@@ -4774,7 +4762,15 @@ fn transform_children<'a, 'b>(
                         *last_was_text = false;
                         context.register_helper("insert");
 
-                        let insert_value = if is_dynamic(&spread.expression) {
+                        let insert_value = if let Some(value) = scope_hydratable_insert_value(
+                            ast,
+                            spread.span,
+                            &spread.expression,
+                            context,
+                            options,
+                        ) {
+                            value
+                        } else if is_dynamic(&spread.expression) {
                             arrow_zero_params_return_expr(
                                 ast,
                                 spread.span,
