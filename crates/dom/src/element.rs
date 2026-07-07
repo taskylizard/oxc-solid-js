@@ -204,19 +204,9 @@ fn template_literal_expr_from_raw<'a>(
         raw: ast.str(raw),
         cooked: Some(ast.str(raw)),
     };
-    let quasis = ast.vec1(ast.template_element(SPAN, value, true, true));
+    let quasis = ast.vec1(ast.template_element(SPAN, value, true));
     let template = ast.template_literal(SPAN, quasis, ast.vec());
     Expression::TemplateLiteral(ast.alloc(template))
-}
-
-fn zero_arg_iife_call_expr<'a>(
-    ast: AstBuilder<'a>,
-    span: Span,
-    expr: Expression<'a>,
-) -> Expression<'a> {
-    let _ = span;
-    let arrow = arrow_zero_params_return_expr(ast, SPAN, expr);
-    call_expr(ast, SPAN, arrow, [])
 }
 
 fn emit_inline_styles_disabled_runtime_update<'a>(
@@ -233,13 +223,14 @@ fn emit_inline_styles_disabled_runtime_update<'a>(
     let style = ident_expr(ast, SPAN, "style");
 
     if effect_wrapper_enabled(options) {
-        context.register_helper("effect");
-        context.register_helper("style");
-        let prev = ident_expr(ast, SPAN, "_$p");
-        let style_call = call_expr(ast, SPAN, style, [elem, style_value, prev]);
-        let callback = arrow_single_param_return_expr(ast, SPAN, "_$p", style_call);
-        let effect = ident_expr(ast, SPAN, "effect");
-        result.exprs.push(call_expr(ast, SPAN, effect, [callback]));
+        result.dynamics.push(DynamicBinding {
+            elem: elem_id.to_string(),
+            key: "style".to_string(),
+            value: style_value,
+            is_svg: false,
+            is_ce: false,
+            tag_name: result.tag_name.clone().unwrap_or_default(),
+        });
     } else {
         context.register_helper("style");
         let style_call = call_expr(ast, SPAN, style, [elem, style_value]);
@@ -1338,7 +1329,7 @@ fn build_merged_class_value<'a>(
             raw: ast.str(raw_str),
             cooked: Some(ast.str(raw_str)),
         };
-        quasis.push(ast.template_element(SPAN, value, is_tail, true));
+        quasis.push(ast.template_element(SPAN, value, is_tail));
     }
 
     let template = ast.template_literal(SPAN, quasis, values);
@@ -3117,12 +3108,11 @@ fn transform_style<'a>(
             Some(JSXAttributeValue::StringLiteral(lit)) => {
                 let template_literal =
                     template_literal_expr_from_raw(ast, attr.span, lit.value.as_str());
-                let wrapped_value = zero_arg_iife_call_expr(ast, attr.span, template_literal);
                 emit_inline_styles_disabled_runtime_update(
                     ast,
                     attr.span,
                     elem_id,
-                    wrapped_value,
+                    template_literal,
                     result,
                     context,
                     options,
@@ -3137,12 +3127,11 @@ fn transform_style<'a>(
                     } else {
                         context.clone_expr(expr)
                     };
-                    let wrapped_value = zero_arg_iife_call_expr(ast, attr.span, style_value);
                     emit_inline_styles_disabled_runtime_update(
                         ast,
                         attr.span,
                         elem_id,
-                        wrapped_value,
+                        style_value,
                         result,
                         context,
                         options,

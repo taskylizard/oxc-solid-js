@@ -70,7 +70,7 @@ This project is licensed under the [MIT License](./LICENSE).
 
 This project also contains code derived or copied from the following projects:
 
-- [babel-plugin-jsx-dom-expressions (MIT)](https://github.com/ryansolid/dom-expressions/tree/main/packages/babel-plugin-jsx-dom-expressions)
+- [@dom-expressions/babel-plugin-jsx (MIT)](https://github.com/ryansolid/dom-expressions/tree/next/packages/babel-plugin-jsx)
 - [solid-refresh (MIT)](https://github.com/solidjs/solid-refresh)
 - [vite-plugin-solid (MIT)](https://github.com/solidjs/vite-plugin-solid)
 

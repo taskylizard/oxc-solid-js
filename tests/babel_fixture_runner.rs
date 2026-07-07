@@ -381,7 +381,7 @@ fn fixture_root() -> PathBuf {
         .join("submodules")
         .join("dom-expressions")
         .join("packages")
-        .join("babel-plugin-jsx-dom-expressions")
+        .join("babel-plugin-jsx")
         .join("test")
 }
 
@@ -480,14 +480,7 @@ fn fixture_suites() -> Vec<FixtureSuite> {
             "__universal_fixtures__",
             dynamic_custom,
         ),
-        FixtureSuite::supported(
-            "ssr",
-            "__ssr_fixtures__",
-            SuiteOptions {
-                hydratable: true,
-                ..ssr
-            },
-        ),
+        FixtureSuite::supported("ssr", "__ssr_fixtures__", ssr),
         FixtureSuite::supported(
             "ssr-hydratable",
             "__ssr_hydratable_fixtures__",
@@ -546,18 +539,7 @@ fn base_options(module_name: &'static str, generate: GenerateMode) -> SuiteOptio
 }
 
 fn run_suite(root: &Path, suite: FixtureSuite) -> Result<(), String> {
-    let suite_dir = if suite.name == "dom-no-inline-styles" {
-        let local = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("__dom_no_inline_styles_fixtures__");
-        if local.exists() {
-            local
-        } else {
-            root.join(suite.fixture_dir)
-        }
-    } else {
-        root.join(suite.fixture_dir)
-    };
+    let suite_dir = root.join(suite.fixture_dir);
 
     if !suite_dir.exists() {
         return Err(format!(
@@ -759,9 +741,9 @@ fn normalize_code(code: &str, filename: &Path) -> Result<String, String> {
         .with_jsx(true);
 
     let parsed = Parser::new(&allocator, &source, source_type).parse();
-    if parsed.panicked || !parsed.errors.is_empty() {
+    if parsed.panicked || !parsed.diagnostics.is_empty() {
         let errors = parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|err| err.to_string())
             .collect::<Vec<_>>()
@@ -782,5 +764,8 @@ fn normalize_code(code: &str, filename: &Path) -> Result<String, String> {
         .build(&parsed.program)
         .code;
 
-    Ok(output.trim().to_string())
+    Ok(output
+        .trim()
+        .replace("/* @__PURE__ */", "/*#__PURE__*/")
+        .to_string())
 }

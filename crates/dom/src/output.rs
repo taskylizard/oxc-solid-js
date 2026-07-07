@@ -1,7 +1,7 @@
 use oxc_allocator::CloneIn;
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, Expression, FormalParameterKind, PropertyKind, Statement,
-    VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ChainElement, Expression, FormalParameterKind, PropertyKind,
+    Statement, VariableDeclarationKind,
 };
 use oxc_ast::{AstBuilder, NONE};
 use oxc_span::{Span, SPAN};
@@ -19,6 +19,19 @@ use crate::universal_output::build_universal_output_expr;
 fn bool_cast_expr<'a>(ast: AstBuilder<'a>, span: Span, expr: Expression<'a>) -> Expression<'a> {
     let not_expr = ast.expression_unary(span, UnaryOperator::LogicalNot, expr);
     ast.expression_unary(span, UnaryOperator::LogicalNot, not_expr)
+}
+
+fn optional_static_member<'a>(
+    ast: AstBuilder<'a>,
+    span: Span,
+    object: Expression<'a>,
+    property: &str,
+) -> Expression<'a> {
+    let prop = ast.identifier_name(span, ast.allocator.alloc_str(property));
+    let member = ast.alloc_static_member_expression(span, object, prop, true);
+    Expression::ChainExpression(
+        ast.alloc_chain_expression(span, ChainElement::StaticMemberExpression(member)),
+    )
 }
 
 fn is_math_ml_template(template: &str) -> bool {
@@ -224,7 +237,6 @@ fn build_multi_dynamic_effect_call<'a>(
 
     let mut value_props = ast.vec_with_capacity(dynamics.len());
     let mut current_props = ast.vec_with_capacity(dynamics.len());
-    let mut prev_props = ast.vec_with_capacity(dynamics.len());
     let mut update_statements = ast.vec_with_capacity(dynamics.len());
 
     for (binding, id) in dynamics.iter().zip(ids.iter()) {
@@ -254,19 +266,8 @@ fn build_multi_dynamic_effect_call<'a>(
             ast.binding_pattern_binding_identifier(span, ast.allocator.alloc_str(id));
         current_props.push(ast.binding_property(span, current_key, current_value, true, false));
 
-        let prev_key = ast.property_key_static_identifier(span, ast.allocator.alloc_str(id));
-        prev_props.push(ast.object_property_kind_object_property(
-            span,
-            PropertyKind::Init,
-            prev_key,
-            ident_expr(ast, span, "undefined"),
-            false,
-            false,
-            false,
-        ));
-
         let current = ident_expr(ast, span, id);
-        let prev = static_member(ast, span, ident_expr(ast, span, prev_name), id);
+        let prev = optional_static_member(ast, span, ident_expr(ast, span, prev_name), id);
         let always_set = binding.key == "class" || binding.key == "style";
 
         let setter = crate::template::generate_set_attr_expr_with_value(
@@ -322,9 +323,8 @@ fn build_multi_dynamic_effect_call<'a>(
         callback_body,
     );
 
-    let init = ast.expression_object(span, prev_props);
     let effect = helper_ident_expr(ast, span, "effect");
-    call_expr(ast, span, effect, [getter, callback, init])
+    call_expr(ast, span, effect, [getter, callback])
 }
 
 pub fn build_dom_output_expr<'a>(

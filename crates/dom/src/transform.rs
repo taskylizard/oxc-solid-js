@@ -1,12 +1,13 @@
 //! Main JSX transform logic
 //! This implements the Traverse trait to walk the AST and transform JSX
 
-use oxc_allocator::Allocator;
+use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionExpression, BindingPattern, CallExpression,
     Class, ClassElement, Expression, FormalParameterKind, Function, JSXChild, JSXElement,
     JSXElementName, JSXExpressionContainer, JSXFragment, JSXText, ObjectProperty, Program,
-    PropertyKind, Statement, TemplateElementValue, VariableDeclarationKind, VariableDeclarator,
+    PropertyKind, Statement, SwitchCase, TemplateElementValue, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc_ast::NONE;
 use oxc_ast_visit::{walk_mut, VisitMut};
@@ -856,6 +857,123 @@ fn capture_class_component_this<'a>(class: &mut Class<'a>, context: &BlockContex
     }
 }
 
+fn extract_statement_position_iife<'a>(
+    expr: &Expression<'a>,
+    context: &BlockContext<'a>,
+) -> Option<(Vec<Statement<'a>>, Expression<'a>)> {
+    let Expression::CallExpression(call) = expr else {
+        return None;
+    };
+    if !call.arguments.is_empty() {
+        return None;
+    }
+
+    let Expression::ArrowFunctionExpression(arrow) = &call.callee else {
+        return None;
+    };
+    if arrow.expression || !arrow.params.items.is_empty() || arrow.params.rest.is_some() {
+        return None;
+    }
+
+    let Some(Statement::ReturnStatement(return_stmt)) = arrow.body.statements.last() else {
+        return None;
+    };
+    let Some(return_expr) = &return_stmt.argument else {
+        return None;
+    };
+
+    let ast = context.ast();
+    let mut prefix = Vec::with_capacity(arrow.body.statements.len().saturating_sub(1));
+    for stmt in arrow
+        .body
+        .statements
+        .iter()
+        .take(arrow.body.statements.len().saturating_sub(1))
+    {
+        prefix.push(stmt.clone_in(ast.allocator));
+    }
+
+    Some((prefix, return_expr.clone_in(ast.allocator)))
+}
+
+fn flatten_statement_position_iifes_in_list<'a>(
+    statements: &mut oxc_allocator::Vec<'a, Statement<'a>>,
+    context: &BlockContext<'a>,
+) {
+    let ast = context.ast();
+    let old_statements = std::mem::replace(statements, ast.vec());
+    let mut flattened = ast.vec_with_capacity(old_statements.len());
+
+    for mut statement in old_statements {
+        let mut prefix_statements = Vec::new();
+
+        match &mut statement {
+            Statement::ReturnStatement(return_stmt) => {
+                if let Some(argument) = &return_stmt.argument {
+                    if let Some((prefix, return_expr)) =
+                        extract_statement_position_iife(argument, context)
+                    {
+                        prefix_statements = prefix;
+                        return_stmt.argument = Some(return_expr);
+                    }
+                }
+            }
+            Statement::VariableDeclaration(var_decl) => {
+                for declarator in &mut var_decl.declarations {
+                    let Some(init) = &declarator.init else {
+                        continue;
+                    };
+                    if let Some((prefix, return_expr)) =
+                        extract_statement_position_iife(init, context)
+                    {
+                        prefix_statements.extend(prefix);
+                        declarator.init = Some(return_expr);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for prefix in prefix_statements {
+            flattened.push(prefix);
+        }
+        flattened.push(statement);
+    }
+
+    *statements = flattened;
+}
+
+struct StatementPositionIifeFlattener<'ctx, 'a> {
+    context: &'ctx BlockContext<'a>,
+}
+
+impl<'a> VisitMut<'a> for StatementPositionIifeFlattener<'_, 'a> {
+    fn visit_program(&mut self, program: &mut Program<'a>) {
+        flatten_statement_position_iifes_in_list(&mut program.body, self.context);
+        walk_mut::walk_program(self, program);
+    }
+
+    fn visit_function_body(&mut self, body: &mut oxc_ast::ast::FunctionBody<'a>) {
+        flatten_statement_position_iifes_in_list(&mut body.statements, self.context);
+        walk_mut::walk_function_body(self, body);
+    }
+
+    fn visit_block_statement(&mut self, block: &mut oxc_ast::ast::BlockStatement<'a>) {
+        flatten_statement_position_iifes_in_list(&mut block.body, self.context);
+        walk_mut::walk_block_statement(self, block);
+    }
+
+    fn visit_switch_case(&mut self, case: &mut SwitchCase<'a>) {
+        flatten_statement_position_iifes_in_list(&mut case.consequent, self.context);
+        walk_mut::walk_switch_case(self, case);
+    }
+}
+
+fn flatten_statement_position_iifes<'a>(program: &mut Program<'a>, context: &BlockContext<'a>) {
+    let mut flattener = StatementPositionIifeFlattener { context };
+    flattener.visit_program(program);
+}
+
 fn apply_class_component_this_capture<'a>(program: &mut Program<'a>, context: &BlockContext<'a>) {
     for statement in &mut program.body {
         if let Statement::ClassDeclaration(class_decl) = statement {
@@ -944,6 +1062,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
         if should_capture_component_this {
             apply_class_component_this_capture(program, &self.context);
         }
+        flatten_statement_position_iifes(program, &self.context);
 
         let templates = self.context.templates.borrow();
         let delegates = self.context.delegates.borrow();
@@ -1265,7 +1384,7 @@ impl<'a> Traverse<'a, ()> for SolidTransform<'a> {
                     raw: ast.str(raw_str),
                     cooked: Some(ast.str(cooked_str)),
                 };
-                quasis.push(ast.template_element(tmpl_span, value, true, false));
+                quasis.push(ast.template_element(tmpl_span, value, true));
                 let template_lit = ast.template_literal(tmpl_span, quasis, ast.vec());
                 let template_expr = Expression::TemplateLiteral(ast.alloc(template_lit));
 

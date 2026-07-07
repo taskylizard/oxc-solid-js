@@ -497,7 +497,7 @@ fn extract_from_normal_attribute<'a>(
             // Extract expression and replace with _props.vN
             let old_expr = std::mem::replace(
                 &mut container.expression,
-                JSXExpression::EmptyExpression(ast.jsx_empty_expression(SPAN)),
+                ast.jsx_expression_empty_expression(SPAN),
             );
             if let Some(expr) = jsx_expression_to_expression(old_expr) {
                 let replacement = push_attribute_and_get_replacement(state, ast, expr);
@@ -541,7 +541,7 @@ fn extract_from_ref<'a>(
     // Take the expression out
     let old_expr = std::mem::replace(
         &mut container.expression,
-        JSXExpression::EmptyExpression(ast.jsx_empty_expression(SPAN)),
+        ast.jsx_expression_empty_expression(SPAN),
     );
 
     let Some(expr) = jsx_expression_to_expression(old_expr) else {
@@ -642,7 +642,7 @@ fn extract_from_use_directive<'a>(
     if let Some(JSXAttributeValue::ExpressionContainer(container)) = &mut attr.value {
         let old_expr = std::mem::replace(
             &mut container.expression,
-            JSXExpression::EmptyExpression(ast.jsx_empty_expression(SPAN)),
+            ast.jsx_expression_empty_expression(SPAN),
         );
         if let Some(expr) = jsx_expression_to_expression(old_expr) {
             let replacement = push_attribute_and_get_replacement(state, ast, expr);
@@ -694,7 +694,7 @@ fn extract_from_expression_container<'a>(
 ) {
     let old_expr = std::mem::replace(
         &mut container.expression,
-        JSXExpression::EmptyExpression(ast.jsx_empty_expression(SPAN)),
+        ast.jsx_expression_empty_expression(SPAN),
     );
     if let Some(expr) = jsx_expression_to_expression(old_expr) {
         let replacement = push_attribute_and_get_replacement(state, ast, expr);

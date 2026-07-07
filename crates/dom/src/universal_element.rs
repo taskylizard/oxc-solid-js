@@ -129,7 +129,7 @@ fn template_literal_expr_from_raw<'a>(
         raw: ast.str(raw),
         cooked: Some(ast.str(cooked)),
     };
-    let quasis = ast.vec1(ast.template_element(span, value, true, false));
+    let quasis = ast.vec1(ast.template_element(span, value, true));
     let template = ast.template_literal(span, quasis, ast.vec());
     Expression::TemplateLiteral(ast.alloc(template))
 }

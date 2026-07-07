@@ -8,7 +8,7 @@ use common::JSX_MEMBER_DASH_SENTINEL;
 use napi_derive::napi;
 
 use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions, CodegenReturn, IndentChar};
+use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 
 use std::path::PathBuf;
@@ -18,6 +18,14 @@ use solid_refresh::{
     Options as RefreshOptions, RuntimeType as RefreshRuntimeType, SolidRefreshTransform,
 };
 use ssr::SSRTransform;
+
+/// Owned result of a transform operation.
+pub struct OwnedTransformResult {
+    /// The transformed code.
+    pub code: String,
+    /// Source map JSON, if source maps were enabled.
+    pub map: Option<String>,
+}
 
 /// Result of a transform operation
 #[cfg(feature = "napi")]
@@ -183,19 +191,19 @@ pub fn transform_jsx(source: String, options: Option<JsTransformOptions>) -> Tra
 
     TransformResult {
         code: result.code,
-        map: result.map.map(|m| m.to_json_string()),
+        map: result.map,
     }
 }
 
 /// Internal transform function
-pub fn transform(source: &str, options: Option<TransformOptions>) -> CodegenReturn {
+pub fn transform(source: &str, options: Option<TransformOptions>) -> OwnedTransformResult {
     let options = options.unwrap_or_else(TransformOptions::solid_defaults);
     transform_internal(source, &options)
 }
 
 const JSX_MEMBER_HYPHEN_ERROR: &str = "Identifiers in JSX cannot contain hyphens";
 
-fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn {
+fn transform_internal(source: &str, options: &TransformOptions) -> OwnedTransformResult {
     let allocator = Allocator::default();
     let source_type = options.source_type;
 
@@ -212,23 +220,21 @@ fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn
 
         let mut spans: Vec<(usize, usize)> = Vec::new();
 
-        for error in &parsed.errors {
+        for error in &parsed.diagnostics {
             if !error.to_string().contains(JSX_MEMBER_HYPHEN_ERROR) {
                 continue;
             }
 
-            if let Some(labels) = &error.labels {
-                for label in labels {
-                    let offset = label.offset();
-                    let len = label.len();
-                    if len == 0 || offset.saturating_add(len) > current_source.len() {
-                        continue;
-                    }
+            for label in &error.labels {
+                let offset = label.offset() as usize;
+                let len = label.len() as usize;
+                if len == 0 || offset.saturating_add(len) > current_source.len() {
+                    continue;
+                }
 
-                    let segment = &current_source[offset..offset + len];
-                    if segment.contains('-') {
-                        spans.push((offset, len));
-                    }
+                let segment = &current_source[offset..offset + len];
+                if segment.contains('-') {
+                    spans.push((offset, len));
                 }
             }
         }
@@ -331,7 +337,7 @@ fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn
     }
 
     // Generate code
-    Codegen::new()
+    let generated = Codegen::new()
         .with_options(CodegenOptions {
             source_map_path: if options.source_map {
                 Some(PathBuf::from(options.filename))
@@ -342,7 +348,12 @@ fn transform_internal(source: &str, options: &TransformOptions) -> CodegenReturn
             indent_char: IndentChar::Space,
             ..CodegenOptions::default()
         })
-        .build(&program)
+        .build(&program);
+
+    OwnedTransformResult {
+        code: generated.code,
+        map: generated.map.map(|map| map.to_json_string()),
+    }
 }
 
 #[cfg(test)]

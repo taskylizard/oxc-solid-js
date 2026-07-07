@@ -63,7 +63,12 @@ pub(crate) fn inline_effect_source_expr<'a>(
     expr: &Expression<'a>,
 ) -> Expression<'a> {
     if let Expression::CallExpression(call) = expr {
-        if call.arguments.is_empty() && matches!(call.callee, Expression::Identifier(_)) {
+        if call.arguments.is_empty()
+            && matches!(
+                call.callee,
+                Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
+            )
+        {
             return call.callee.clone_in(ast.allocator);
         }
     }

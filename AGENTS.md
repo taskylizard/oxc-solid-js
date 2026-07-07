@@ -1,11 +1,11 @@
 # AGENTS
 
-Port **@dom-expressions/packages/babel-plugin-jsx-dom-expressions** fully to OXC. The goal is output parity with the Babel plugin for DOM, SSR, and eventual hydratable/universal/dynamic modes.
+Port **@dom-expressions/packages/babel-plugin-jsx** fully to OXC. The goal is output parity with the Babel plugin for DOM, SSR, and eventual hydratable/universal/dynamic modes.
 
 ## Source of Truth (parity targets)
 
-- Upstream implementation: `dom-expressions/packages/babel-plugin-jsx-dom-expressions/src`
-- Upstream fixtures: `dom-expressions/packages/babel-plugin-jsx-dom-expressions/test`
+- Upstream implementation: `dom-expressions/packages/babel-plugin-jsx/src`
+- Upstream fixtures: `dom-expressions/packages/babel-plugin-jsx/test`
 - Local parity runner: `tests/babel_fixture_runner.rs`
 - Local behavior tests: `tests/transform_tests.rs`
 
